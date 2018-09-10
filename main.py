@@ -1,12 +1,16 @@
+#!/usr/bin/env python3
+
 import logging
 import pathlib
 import pickle
 from typing import Dict, Any, Tuple, Optional, List
+from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
 
 import requests
 import feedparser
+from colorama import Fore, Style
 from geopy import distance
 from bs4 import BeautifulSoup
 from tabulate import tabulate
@@ -51,6 +55,7 @@ class Property:
     area: float
     rooms: float
     monthly_fee: float
+    published: Optional[datetime] = None
     coords: Optional[Tuple[float, float]] = None
 
     def __repr__(self):
@@ -58,7 +63,7 @@ class Property:
 
     @staticmethod
     def headers() -> List[str]:
-        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/m²/mo", "d(Lund C)+d(LTH)"]
+        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/m²/mo", "d(Lund C)+d(LTH)", "published"]
 
     def row(self) -> List[Any]:
         return [
@@ -68,9 +73,10 @@ class Property:
             self.area,
             self.monthly_fee,
             self.rooms,
-            self.monthly_cost(),
-            self.monthly_cost_per_sqm(),
+            round(self.monthly_cost()),
+            round(self.monthly_cost_per_sqm(), 1),
             (self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0) or None,
+            f"{str(self.time_since_published().days) + 'd ago' if self.time_since_published else ''}",
         ]
 
     def monthly_cost_per_sqm(self) -> float:
@@ -83,6 +89,9 @@ class Property:
         if not self.coords:
             return None
         return distance.distance(self.coords, other).km
+
+    def time_since_published(self) -> Optional[timedelta]:
+        return datetime.now() - self.published if self.published else None
 
 
 db = Datastore()
@@ -106,7 +115,7 @@ def parse_page(title, link):
         price = float("".join(priceprop.string.strip().split(" ")[:-1]))
         # print(price)
     else:
-        print("Probably already sold")
+        cprint("Probably already sold", Fore.YELLOW)
         return
 
     monthly_fee = 0
@@ -136,16 +145,27 @@ def get_coord(address) -> Optional[Tuple[float, float]]:
     return None
 
 
-def crawl() -> List[Property]:
-    print("Crawling...")
-    d = feedparser.parse('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml')
-
-    for entry in d.entries:
+def _crawl_feed(url):
+    for entry in feedparser.parse(url).entries:
         title, link = entry['title'], entry['link']
         if not db.data[link]:
             prop = parse_page(title, link)
             if prop:
+                prop.published = datetime(*entry['published_parsed'][:6])
                 db.data[link]["property"] = prop
+
+
+def cprint(msg, color):
+    print(color + msg + Style.RESET_ALL)
+
+
+def crawl() -> List[Property]:
+    cprint("Crawling...", Fore.GREEN)
+    for url in [
+        'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml',
+        'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml'
+    ]:
+        _crawl_feed(url)
 
     assign_coords()
     db.save()
@@ -153,7 +173,7 @@ def crawl() -> List[Property]:
 
 
 def assign_coords() -> None:
-    print("Mapping addresses to coordinates...")
+    cprint("Mapping addresses to coordinates...", Fore.GREEN)
     props = [v["property"] for v in db.data.values() if "property" in v]
     for prop in props:
         if not prop.coords:
@@ -161,12 +181,12 @@ def assign_coords() -> None:
 
 
 def filter_unwanted(props):
-    print("Filtering away unwanted...")
+    cprint("Filtering away unwanted...", Fore.YELLOW)
 
     def f(p: Property):
         return p.rooms <= 3 and \
             p.area >= 55 and \
-            p.monthly_cost() < 5000 and \
+            p.monthly_cost() < 4500 and \
             ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 5)
 
     return [p for p in props if f(p)]
@@ -174,8 +194,9 @@ def filter_unwanted(props):
 
 def main() -> None:
     props = crawl()
+    cprint(f"{len(props)} properties in database", Fore.YELLOW)
     props = filter_unwanted(props)
-    props = sorted(props, key=lambda p: p.monthly_cost_per_sqm())
+    props = sorted(props, key=lambda p: p.published)
 
     print(tabulate([p.row() for p in props], headers=Property.headers(), floatfmt=(None, '.0f')))
 

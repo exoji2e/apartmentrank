@@ -9,6 +9,7 @@ requests = "*"
 "beautifulsoup4" = "*"
 geopy = "*"
 tabulate = "*"
+colorama = "*"
 
 [dev-packages]
 mypy = "*"
