@@ -177,11 +177,7 @@ def main() -> None:
     props = filter_unwanted(props)
     props = sorted(props, key=lambda p: p.monthly_cost_per_sqm())
 
-    tableprops = [Property.headers()] + [
-        p.row()
-        for p in props
-    ]
-    print(tabulate(tableprops[1:20], headers=tableprops[0], floatfmt=(None, '.0f')))
+    print(tabulate([p.row() for p in props], headers=Property.headers(), floatfmt=(None, '.0f')))
 
 
 if __name__ == "__main__":
