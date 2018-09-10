@@ -18,6 +18,10 @@ logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
 
+lund_c_coords = (55.7068, 13.187)
+lth_coords = (55.7124, 13.2091)
+
+
 class Datastore:
     path = pathlib.Path('./datastore.pickle')
     data: Dict[str, Dict[str, Any]] = defaultdict(lambda: dict())
@@ -44,33 +48,33 @@ class Property:
     link: str
     address: str
     price: float
-    sqm: float
+    area: float
     rooms: float
     monthly_fee: float
     coords: Optional[Tuple[float, float]] = None
 
     def __repr__(self):
-        return f"<{self.address}: {self.link}\n  Pris: {self.price}\n  Area: {self.sqm}\n  Fee: {self.monthly_fee}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/sqm: {self.monthly_cost_per_sqm()}\n  Dist to Lund C: {self.distance_to(lund_c_coords)}>"
+        return f"<{self.address},\n  Area: {self.area}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/m²: {self.monthly_cost_per_sqm()}>"
 
     @staticmethod
     def headers() -> List[str]:
-        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/sqm/mo", "Dist to Lund C"]
+        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/m²/mo", "d(Lund C)+d(LTH)"]
 
     def row(self) -> List[Any]:
         return [
             self.address,
             #self.link,
             self.price,
-            self.sqm,
+            self.area,
             self.monthly_fee,
             self.rooms,
             self.monthly_cost(),
             self.monthly_cost_per_sqm(),
-            self.distance_to(lund_c_coords)
+            (self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0) or None,
         ]
 
     def monthly_cost_per_sqm(self) -> float:
-        return self.monthly_cost() / self.sqm
+        return self.monthly_cost() / self.area
 
     def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3) -> float:
         return ((self.price - downpayment) * (interest * (1 - taxreduction) / 12)) + self.monthly_fee
@@ -90,7 +94,6 @@ def get_entry(link: str) -> str:
         with db:
             db.data[link].update(page=r.content)
     else:
-        print(db.data)
         log.debug(f"Got {link} from cache")
     return db.data[link]["page"]
 
@@ -133,9 +136,6 @@ def get_coord(address) -> Optional[Tuple[float, float]]:
     return None
 
 
-lund_c_coords = (55.7068, 13.187)
-
-
 def crawl() -> List[Property]:
     print("Crawling...")
     d = feedparser.parse('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml')
@@ -160,14 +160,28 @@ def assign_coords() -> None:
             prop.coords = get_coord(prop.address)
 
 
+def filter_unwanted(props):
+    print("Filtering away unwanted...")
+
+    def f(p: Property):
+        return p.rooms <= 3 and \
+            p.area >= 55 and \
+            p.monthly_cost() < 5000 and \
+            ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 5)
+
+    return [p for p in props if f(p)]
+
+
 def main() -> None:
     props = crawl()
+    props = filter_unwanted(props)
+    props = sorted(props, key=lambda p: p.monthly_cost_per_sqm())
 
     tableprops = [Property.headers()] + [
         p.row()
-        for p in sorted(props, key=lambda p: p.monthly_cost_per_sqm())
+        for p in props
     ]
-    print(tabulate(tableprops[1:20], headers=tableprops[0]))
+    print(tabulate(tableprops[1:20], headers=tableprops[0], floatfmt=(None, '.0f')))
 
 
 if __name__ == "__main__":
