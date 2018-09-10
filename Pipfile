@@ -11,6 +11,7 @@ geopy = "*"
 tabulate = "*"
 
 [dev-packages]
+mypy = "*"
 
 [requires]
 python_version = "3.7"

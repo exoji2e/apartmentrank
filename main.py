@@ -1,29 +1,28 @@
 import logging
 import pathlib
 import pickle
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
 from collections import defaultdict
 from dataclasses import dataclass
 
 import requests
 import feedparser
-import geopy
 from geopy import distance
 from bs4 import BeautifulSoup
 from tabulate import tabulate
 
 
 logging.basicConfig(level=logging.DEBUG)
-log = logging.getLogger(__name__)
 logging.getLogger("geopy").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
+log = logging.getLogger(__name__)
 
 
 class Datastore:
     path = pathlib.Path('./datastore.pickle')
     data: Dict[str, Dict[str, Any]] = defaultdict(lambda: dict())
 
-    def __init__(self):
+    def __init__(self) -> None:
         if self.path.exists():
             with self.path.open("rb") as f:
                 data = pickle.load(f)
@@ -35,7 +34,7 @@ class Datastore:
     def __exit__(self, *args, **kwargs):
         self.save()
 
-    def save(self):
+    def save(self) -> None:
         with open(self.path, "wb+") as f:
             pickle.dump(dict(self.data), f)
 
@@ -54,10 +53,10 @@ class Property:
         return f"<{self.address}: {self.link}\n  Pris: {self.price}\n  Area: {self.sqm}\n  Fee: {self.monthly_fee}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/sqm: {self.monthly_cost_per_sqm()}\n  Dist to Lund C: {self.distance_to(lund_c_coords)}>"
 
     @staticmethod
-    def headers():
+    def headers() -> List[str]:
         return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/sqm/mo", "Dist to Lund C"]
 
-    def row(self):
+    def row(self) -> List[Any]:
         return [
             self.address,
             #self.link,
@@ -70,13 +69,13 @@ class Property:
             self.distance_to(lund_c_coords)
         ]
 
-    def monthly_cost_per_sqm(self):
+    def monthly_cost_per_sqm(self) -> float:
         return self.monthly_cost() / self.sqm
 
-    def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3):
+    def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3) -> float:
         return ((self.price - downpayment) * (interest * (1 - taxreduction) / 12)) + self.monthly_fee
 
-    def distance_to(self, other: Tuple[float, float]):
+    def distance_to(self, other: Tuple[float, float]) -> Optional[float]:
         if not self.coords:
             return None
         return distance.distance(self.coords, other).km
@@ -85,7 +84,7 @@ class Property:
 db = Datastore()
 
 
-def get_entry(link):
+def get_entry(link: str) -> str:
     if "page" not in db.data[link]:
         r = requests.get(link)
         with db:
@@ -125,7 +124,7 @@ def parse_page(title, link):
     return Property(link, title, price, sqm, rooms, monthly_fee)
 
 
-def get_coord(address):
+def get_coord(address) -> Optional[Tuple[float, float]]:
     from geopy.geocoders import Nominatim
     geolocator = Nominatim(user_agent="apartmentbuyer")
     location = geolocator.geocode(address + ", Lund")
@@ -137,7 +136,7 @@ def get_coord(address):
 lund_c_coords = (55.7068, 13.187)
 
 
-def crawl():
+def crawl() -> List[Property]:
     print("Crawling...")
     d = feedparser.parse('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml')
 
@@ -149,9 +148,11 @@ def crawl():
                 db.data[link]["property"] = prop
 
     assign_coords()
+    db.save()
+    return [v["property"] for v in db.data.values() if "property" in v]
 
 
-def assign_coords():
+def assign_coords() -> None:
     print("Mapping addresses to coordinates...")
     props = [v["property"] for v in db.data.values() if "property" in v]
     for prop in props:
@@ -159,11 +160,8 @@ def assign_coords():
             prop.coords = get_coord(prop.address)
 
 
-def main():
-    crawl()
-    db.save()
-
-    props = [v["property"] for v in db.data.values() if "property" in v]
+def main() -> None:
+    props = crawl()
 
     tableprops = [Property.headers()] + [
         p.row()
