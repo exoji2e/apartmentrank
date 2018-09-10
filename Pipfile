@@ -8,6 +8,7 @@ feedparser = "*"
 requests = "*"
 "beautifulsoup4" = "*"
 geopy = "*"
+tabulate = "*"
 
 [dev-packages]
 

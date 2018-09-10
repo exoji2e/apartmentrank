@@ -1,17 +1,27 @@
+import logging
 import pathlib
 import pickle
+from typing import Dict, Any, Tuple, Optional
 from collections import defaultdict
 from dataclasses import dataclass
 
 import requests
 import feedparser
 import geopy
+from geopy import distance
 from bs4 import BeautifulSoup
+from tabulate import tabulate
+
+
+logging.basicConfig(level=logging.DEBUG)
+log = logging.getLogger(__name__)
+logging.getLogger("geopy").setLevel(logging.INFO)
+logging.getLogger("urllib3").setLevel(logging.INFO)
 
 
 class Datastore:
     path = pathlib.Path('./datastore.pickle')
-    data = defaultdict(lambda: dict())
+    data: Dict[str, Dict[str, Any]] = defaultdict(lambda: dict())
 
     def __init__(self):
         if self.path.exists():
@@ -38,26 +48,52 @@ class Property:
     sqm: float
     rooms: float
     monthly_fee: float
+    coords: Optional[Tuple[float, float]] = None
 
     def __repr__(self):
-        return f"<{self.address}: {self.link}\n  Pris: {self.price}\n  Area: {self.sqm}\n  Fee: {self.monthly_fee}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/sqm: {self.monthly_cost_per_sqm()}>"
+        return f"<{self.address}: {self.link}\n  Pris: {self.price}\n  Area: {self.sqm}\n  Fee: {self.monthly_fee}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/sqm: {self.monthly_cost_per_sqm()}\n  Dist to Lund C: {self.distance_to(lund_c_coords)}>"
+
+    @staticmethod
+    def headers():
+        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/sqm/mo", "Dist to Lund C"]
+
+    def row(self):
+        return [
+            self.address,
+            #self.link,
+            self.price,
+            self.sqm,
+            self.monthly_fee,
+            self.rooms,
+            self.monthly_cost(),
+            self.monthly_cost_per_sqm(),
+            self.distance_to(lund_c_coords)
+        ]
 
     def monthly_cost_per_sqm(self):
         return self.monthly_cost() / self.sqm
 
-    def monthly_cost(self, downpayment=1_000_000, interest=0.02):
-        return (((self.price - downpayment) * interest / 12) + self.monthly_fee)
+    def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3):
+        return ((self.price - downpayment) * (interest * (1 - taxreduction) / 12)) + self.monthly_fee
+
+    def distance_to(self, other: Tuple[float, float]):
+        if not self.coords:
+            return None
+        return distance.distance(self.coords, other).km
 
 
 db = Datastore()
 
 
 def get_entry(link):
-    if link not in db.data:
+    if "page" not in db.data[link]:
         r = requests.get(link)
         with db:
-            db.data[link] = r.content
-    return db.data[link]
+            db.data[link].update(page=r.content)
+    else:
+        print(db.data)
+        log.debug(f"Got {link} from cache")
+    return db.data[link]["page"]
 
 
 def parse_page(title, link):
@@ -92,29 +128,48 @@ def parse_page(title, link):
 def get_coord(address):
     from geopy.geocoders import Nominatim
     geolocator = Nominatim(user_agent="apartmentbuyer")
-    location = geolocator.geocode(address)
+    location = geolocator.geocode(address + ", Lund")
     if location:
         return (location.latitude, location.longitude)
     return None
 
 
-    
+lund_c_coords = (55.7068, 13.187)
+
+
+def crawl():
+    print("Crawling...")
+    d = feedparser.parse('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml')
+
+    for entry in d.entries:
+        title, link = entry['title'], entry['link']
+        if not db.data[link]:
+            prop = parse_page(title, link)
+            if prop:
+                db.data[link]["property"] = prop
+
+    assign_coords()
+
+
+def assign_coords():
+    print("Mapping addresses to coordinates...")
+    props = [v["property"] for v in db.data.values() if "property" in v]
+    for prop in props:
+        if not prop.coords:
+            prop.coords = get_coord(prop.address)
 
 
 def main():
-    d = feedparser.parse('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml')
+    crawl()
+    db.save()
 
-    props = []
-    for entry in d.entries:
-        prop = parse_page(entry['title'], entry['link'])
-        # coord = get_coord(entry['title'])
-        # print(coord)
+    props = [v["property"] for v in db.data.values() if "property" in v]
 
-        if prop:
-            props.append(prop)
-
-    for prop in sorted(props, key=lambda p: p.monthly_cost_per_sqm()):
-        print(prop)
+    tableprops = [Property.headers()] + [
+        p.row()
+        for p in sorted(props, key=lambda p: p.monthly_cost_per_sqm())
+    ]
+    print(tabulate(tableprops[1:20], headers=tableprops[0]))
 
 
 if __name__ == "__main__":
