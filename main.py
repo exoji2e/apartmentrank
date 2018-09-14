@@ -76,7 +76,7 @@ class Property:
             round(self.monthly_cost()),
             round(self.monthly_cost_per_sqm(), 1),
             (self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0) or None,
-            f"{str(self.time_since_published().days) + 'd ago' if self.time_since_published else ''}",
+            f"{str(self.time_since_published().days) + 'd ago' if self.time_since_published() else ''}",
         ]
 
     def monthly_cost_per_sqm(self) -> float:
@@ -159,13 +159,32 @@ def cprint(msg, color):
     print(color + msg + Style.RESET_ALL)
 
 
-def crawl() -> List[Property]:
+def _crawl_hemnet():
     cprint("Crawling...", Fore.GREEN)
     for url in [
         'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml',
         'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml'
     ]:
         _crawl_feed(url)
+
+
+def _crawl_afb():
+    r = requests.get("https://www.afbostader.se/redimo/rest/vacantproducts")
+    data = r.json()['product']
+    for a in data:
+        p = Property(link=f"https://www.afbostader.se/lediga-bostader/bostadsdetalj/?obj={a['productId']}&area={a['area']}",
+                     address=a['address'],
+                     area=float(a['sqrMtrs']),
+                     monthly_fee=float(a['rent']),
+                     rooms=1 if a['shortDescription'] == 'Korridorrum' else float(a['shortDescription'].split()[0]),
+                     price=0,
+                     published=datetime(*map(int, a['reserveFromDate'].split("-"))))
+        db.data[p.link]['property'] = p
+
+
+def crawl() -> List[Property]:
+    _crawl_hemnet()
+    _crawl_afb()
 
     assign_coords()
     db.save()
@@ -184,9 +203,9 @@ def filter_unwanted(props):
     cprint("Filtering away unwanted...", Fore.YELLOW)
 
     def f(p: Property):
-        return p.rooms <= 3 and \
-            p.area >= 55 and \
-            p.monthly_cost() < 4500 and \
+        return p.area >= 55 and \
+            p.monthly_cost() < 6000 and \
+            p.monthly_cost_per_sqm() < 100 and \
             ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 5)
 
     return [p for p in props if f(p)]
