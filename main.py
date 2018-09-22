@@ -7,6 +7,7 @@ from typing import Dict, Any, Tuple, Optional, List
 from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
+from math import atan2, degrees
 
 import requests
 import feedparser
@@ -47,6 +48,22 @@ class Datastore:
             pickle.dump(dict(self.data), f)
 
 
+def degrees_to_direction(deg: float):
+    dirs = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
+    i = round((((deg + 360) % 360) / 360) * len(dirs))
+    print(deg, i)
+    return dirs[i % (len(dirs))]
+
+
+def test_degrees_to_direction():
+    assert all(degrees_to_direction(d) == "E" for d in (-20, 0, 20))
+    assert all(degrees_to_direction(d) == "NE" for d in [30, 45])
+    assert all(degrees_to_direction(d) == "N" for d in [90])
+    assert all(degrees_to_direction(d) == "NW" for d in [90 + 45])
+    assert all(degrees_to_direction(d) == "W" for d in [180])
+    assert all(degrees_to_direction(d) == "S" for d in [270])
+
+
 @dataclass
 class Property:
     link: str
@@ -63,7 +80,7 @@ class Property:
 
     @staticmethod
     def headers() -> List[str]:
-        return ["address", "price", "area", "fee", "rooms", "cost/mo", "cost/m²/mo", "d(Lund C)+d(LTH)", "published"]
+        return ["address", "price", "area", "fee", "rooms", "cst/mo", "cst/m²/mo", "dist", "dir", "publ"]
 
     def row(self) -> List[Any]:
         return [
@@ -75,7 +92,8 @@ class Property:
             self.rooms,
             round(self.monthly_cost()),
             round(self.monthly_cost_per_sqm(), 1),
-            (self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0) or None,
+            round((self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0), 1) or None,
+            self.direction(lund_c_coords),
             f"{str(self.time_since_published().days) + 'd ago' if self.time_since_published() else ''}",
         ]
 
@@ -85,6 +103,12 @@ class Property:
     def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3) -> float:
         return ((self.price - downpayment) * (interest * (1 - taxreduction) / 12)) + self.monthly_fee
 
+    def direction(self, other: Tuple[float, float]) -> Optional[str]:
+        if self.coords:
+            d = atan2(self.coords[0] - other[0], self.coords[1] - other[1])
+            return degrees_to_direction(degrees(d))
+        return None
+
     def distance_to(self, other: Tuple[float, float]) -> Optional[float]:
         if not self.coords:
             return None
@@ -92,9 +116,6 @@ class Property:
 
     def time_since_published(self) -> Optional[timedelta]:
         return datetime.now() - self.published if self.published else None
-
-
-db = Datastore()
 
 
 def get_entry(link: str) -> str:
@@ -206,7 +227,7 @@ def filter_unwanted(props):
         return p.area >= 55 and \
             p.monthly_cost() < 6000 and \
             p.monthly_cost_per_sqm() < 100 and \
-            ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 5)
+            ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 10)
 
     return [p for p in props if f(p)]
 
@@ -214,11 +235,15 @@ def filter_unwanted(props):
 def main() -> None:
     props = crawl()
     cprint(f"{len(props)} properties in database", Fore.YELLOW)
+
     props = filter_unwanted(props)
+    # If you want to see AFB apartments, use this filtering instead.
+    # props = filter(lambda p: p.price == 0, props)
     props = sorted(props, key=lambda p: p.published)
 
     print(tabulate([p.row() for p in props], headers=Property.headers(), floatfmt=(None, '.0f')))
 
 
 if __name__ == "__main__":
+    db = Datastore()
     main()
