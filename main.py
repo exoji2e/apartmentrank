@@ -22,7 +22,10 @@ logging.getLogger("geopy").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
+city = "Malmö"
 
+malmo_c_coords = (55.6091, 12.9999)
+triangeln_coords = (55.5944, 13.0004)
 lund_c_coords = (55.7068, 13.187)
 lth_coords = (55.7124, 13.2091)
 
@@ -51,7 +54,6 @@ class Datastore:
 def degrees_to_direction(deg: float):
     dirs = ["E", "NE", "N", "NW", "W", "SW", "S", "SE"]
     i = round((((deg + 360) % 360) / 360) * len(dirs))
-    print(deg, i)
     return dirs[i % (len(dirs))]
 
 
@@ -74,6 +76,7 @@ class Property:
     monthly_fee: float
     published: Optional[datetime] = None
     coords: Optional[Tuple[float, float]] = None
+    city: Optional[str] = None
 
     def __repr__(self):
         return f"<{self.address},\n  Area: {self.area}\n  Rooms: {self.rooms}\n  MoCost: {self.monthly_cost()}\n  MoCost/m²: {self.monthly_cost_per_sqm()}>"
@@ -83,6 +86,12 @@ class Property:
         return ["address", "price", "area", "fee", "rooms", "cst/mo", "cst/m²/mo", "dist", "dir", "publ"]
 
     def row(self) -> List[Any]:
+        if city == "Lund":
+            dist = round(sum(self.distance_to(loc) or 0 for loc in [lund_c_coords, lth_coords]), 1) or None
+            direction = self.direction(lund_c_coords)
+        elif city == "Malmö":
+            dist = round(min(self.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]), 1) or None
+            direction = self.direction(malmo_c_coords)
         return [
             self.address,
             #self.link,
@@ -92,8 +101,8 @@ class Property:
             self.rooms,
             round(self.monthly_cost()),
             round(self.monthly_cost_per_sqm(), 1),
-            round((self.distance_to(lund_c_coords) or 0) + (self.distance_to(lth_coords) or 0), 1) or None,
-            self.direction(lund_c_coords),
+            dist,
+            direction,
             f"{str(self.time_since_published().days) + 'd ago' if self.time_since_published() else ''}",
         ]
 
@@ -157,21 +166,22 @@ def parse_page(title, link):
     return Property(link, title, price, sqm, rooms, monthly_fee)
 
 
-def get_coord(address) -> Optional[Tuple[float, float]]:
+def get_coord(address, city=None) -> Optional[Tuple[float, float]]:
     from geopy.geocoders import Nominatim
     geolocator = Nominatim(user_agent="apartmentbuyer")
-    location = geolocator.geocode(address + ", Lund")
+    location = geolocator.geocode(address + ", {city or 'Skane'}")
     if location:
         return (location.latitude, location.longitude)
     return None
 
 
-def _crawl_feed(url):
+def _crawl_feed(url, city):
     for entry in feedparser.parse(url).entries:
         title, link = entry['title'], entry['link']
         if not db.data[link]:
             prop = parse_page(title, link)
             if prop:
+                prop.city = city
                 prop.published = datetime(*entry['published_parsed'][:6])
                 db.data[link]["property"] = prop
 
@@ -182,11 +192,12 @@ def cprint(msg, color):
 
 def _crawl_hemnet():
     cprint("Crawling...", Fore.GREEN)
-    for url in [
-        'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml',
-        'https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml'
+    for url, city in [
+        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml', "Lund"),
+        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml', "Lund"),
+        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/16190055.xml', "Malmö"),
     ]:
-        _crawl_feed(url)
+        _crawl_feed(url, city)
 
 
 def _crawl_afb():
@@ -206,18 +217,14 @@ def _crawl_afb():
 def crawl() -> List[Property]:
     _crawl_hemnet()
     _crawl_afb()
-
-    assign_coords()
-    db.save()
     return [v["property"] for v in db.data.values() if "property" in v]
 
 
-def assign_coords() -> None:
+def assign_coords(props) -> None:
     cprint("Mapping addresses to coordinates...", Fore.GREEN)
-    props = [v["property"] for v in db.data.values() if "property" in v]
     for prop in props:
         if not prop.coords:
-            prop.coords = get_coord(prop.address)
+            prop.coords = get_coord(prop.address, prop.city)
 
 
 def filter_unwanted(props):
@@ -226,15 +233,26 @@ def filter_unwanted(props):
     def f(p: Property):
         return p.area >= 55 and \
             p.monthly_cost() < 6000 and \
-            p.monthly_cost_per_sqm() < 100 and \
-            ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 10)
+            p.monthly_cost_per_sqm() < 100
 
-    return [p for p in props if f(p)]
+    def dist(p: Property):
+        if city == "Lund":
+            return ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 10)
+        elif city == "Malmö":
+            return (min(p.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]) < 10)
+        else:
+            return True
+
+    return [p for p in props if f(p) and dist(p)]
 
 
 def main() -> None:
+    cprint(f"Looking for apartments in {city}", Fore.GREEN)
     props = crawl()
     cprint(f"{len(props)} properties in database", Fore.YELLOW)
+
+    assign_coords(props)
+    db.save()
 
     props = filter_unwanted(props)
     # If you want to see AFB apartments, use this filtering instead.
