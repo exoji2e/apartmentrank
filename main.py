@@ -1,28 +1,31 @@
-#!/usr/bin/env python3
-
 import logging
 import pathlib
 import pickle
+import re
 from typing import Dict, Any, Tuple, Optional, List
 from datetime import datetime, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
 from math import atan2, degrees
 
-import requests
-import feedparser
 from colorama import Fore, Style
 from geopy import distance
+from geopy.geocoders import Nominatim
 from bs4 import BeautifulSoup
 from tabulate import tabulate
 
+import requests
+import feedparser
+
+# from joblib import Memory
+# memory = Memory('.joblibcache', verbose=0)
 
 logging.basicConfig(level=logging.DEBUG)
 logging.getLogger("geopy").setLevel(logging.INFO)
 logging.getLogger("urllib3").setLevel(logging.INFO)
 log = logging.getLogger(__name__)
 
-city = "Malmö"
+CITY = "Lund"
 
 malmo_c_coords = (55.6091, 12.9999)
 triangeln_coords = (55.5944, 13.0004)
@@ -30,9 +33,15 @@ lund_c_coords = (55.7068, 13.187)
 lth_coords = (55.7124, 13.2091)
 
 
+DOWNPAYMENT = 1_050_000
+LOAN_FACTOR = None  # 0.7
+INTEREST = 0.015
+OPPORTUNITY_COC_RATE = 0.00
+
+
 class Datastore:
     path = pathlib.Path('./datastore.pickle')
-    data: Dict[str, Dict[str, Any]] = defaultdict(lambda: dict())
+    data: Dict[str, Dict[str, Any]] = defaultdict(dict)
 
     def __init__(self) -> None:
         if self.path.exists():
@@ -66,6 +75,19 @@ def test_degrees_to_direction():
     assert all(degrees_to_direction(d) == "S" for d in [270])
 
 
+cities: Dict[str, Dict[str, Any]] = {
+    "Lund": {
+        "center": lund_c_coords,
+        "attractors": [lund_c_coords],
+        # attractors = [center, lth_coords]
+    },
+    "Malmö": {
+        "center": malmo_c_coords,
+        "attractors": [malmo_c_coords, triangeln_coords],
+    }
+}
+
+
 @dataclass
 class Property:
     link: str
@@ -86,19 +108,16 @@ class Property:
         return ["address", "price", "area", "fee", "rooms", "cst/mo", "cst/m²/mo", "dist", "dir", "publ"]
 
     def row(self) -> List[Any]:
-        if city == "Lund":
-            dist = round(sum(self.distance_to(loc) or 0 for loc in [lund_c_coords, lth_coords]), 1) or None
-            direction = self.direction(lund_c_coords)
-        elif city == "Malmö":
-            dist = round(min(self.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]), 1) or None
-            direction = self.direction(malmo_c_coords)
+        attractors = cities[CITY]["attractors"]
+        dist = round(sum(self.distance_to(loc) or 0 for loc in attractors), 1) or None
+        direction = self.direction(lund_c_coords)
         return [
             self.address,
             #self.link,
             self.price,
             self.area,
             self.monthly_fee,
-            self.rooms,
+            "x" * int(self.rooms) + "." * (round(self.rooms) - int(self.rooms)),  # + f" ({self.rooms})",
             round(self.monthly_cost()),
             round(self.monthly_cost_per_sqm(), 1),
             dist,
@@ -109,8 +128,11 @@ class Property:
     def monthly_cost_per_sqm(self) -> float:
         return self.monthly_cost() / self.area
 
-    def monthly_cost(self, downpayment=800_000, interest=0.016, taxreduction=0.3) -> float:
-        return ((self.price - downpayment) * (interest * (1 - taxreduction) / 12)) + self.monthly_fee
+    def monthly_cost(self, downpayment=DOWNPAYMENT, interest=INTEREST, taxreduction=0.3, loan_factor=LOAN_FACTOR) -> float:
+        loaned = loan_factor * self.price if loan_factor else max(0, self.price - downpayment)
+        mortgage = loaned * (interest * (1 - taxreduction) / 12)
+        cost_of_capital = (self.price - loaned) * OPPORTUNITY_COC_RATE / 12
+        return mortgage + self.monthly_fee + cost_of_capital
 
     def direction(self, other: Tuple[float, float]) -> Optional[str]:
         if self.coords:
@@ -138,40 +160,51 @@ def get_entry(link: str) -> str:
 
 
 def parse_page(title, link):
-    soup = BeautifulSoup(get_entry(link), 'html.parser')
+    txt = get_entry(link)
+    # print(txt)
+    soup = BeautifulSoup(txt, 'html.parser')
+    # print(soup)
 
     priceprop = soup.find(class_="property__price")
     if priceprop:
         price = float("".join(priceprop.string.strip().split(" ")[:-1]))
-        # print(price)
+        monthly_fee = 0
+        for p in soup.find(class_="property__attributes-container").find_all("dd"):
+            txt = p.string
+            if not txt:
+                txt = p.contents[0]
+            # &nbsp; to space
+            txt = txt.replace("\xa0", " ")
+            if txt.split()[-1] == "m²":
+                sqm = float(txt.split(" ")[0].replace(",", "."))
+            elif "rum" in txt:
+                rooms = float(txt.split(" ")[0].replace(",", "."))
+            elif "kr/m" in txt and "n" in txt:
+                num = "".join(txt.strip().split(" ")[:-1])
+                monthly_fee = float(num.replace(",", "."))
+
+        return Property(link, title, price, sqm, rooms, monthly_fee)
     else:
         cprint("Probably already sold", Fore.YELLOW)
         return
 
-    monthly_fee = 0
-    for p in soup.find(class_="property__attributes").find_all("dd"):
-        txt = p.string
-        if not txt:
-            txt = p.contents[0]
-        # &nbsp; to space
-        txt = txt.replace("\xa0", " ")
-        if "m²" == txt.split()[-1]:
-            sqm = float(txt.split(" ")[0].replace(",", "."))
-        elif "rum" in txt:
-            rooms = float(txt.split(" ")[0].replace(",", "."))
-        elif "kr/m" in txt and "n" in txt:
-            num = "".join(txt.strip().split(" ")[:-1])
-            monthly_fee = float(num.replace(",", "."))
-
-    return Property(link, title, price, sqm, rooms, monthly_fee)
-
 
 def get_coord(address, city=None) -> Optional[Tuple[float, float]]:
-    from geopy.geocoders import Nominatim
-    geolocator = Nominatim(user_agent="apartmentbuyer")
-    location = geolocator.geocode(address + ", {city or 'Skane'}")
-    if location:
-        return (location.latitude, location.longitude)
+    geolocator = Nominatim(user_agent="apartmentbuyer", timeout=10)
+    try:
+        address = address.split("lgh")[0].split(",")[0] + f", {city or 'Skane'}"
+
+        # Remove spaces in building/apartment ID 'Streetname 2 A' to just 'Streetname 2A'
+        address = re.sub('([0-9]+) ([A-Z])', r'\1\2', address)
+
+        print(f"Getting coordinates for '{address}'... \t", end='')
+        location = geolocator.geocode(address)
+        if location:
+            cprint("DONE!", Fore.GREEN)
+            return (location.latitude, location.longitude)
+        cprint('failed', Fore.RED)
+    except Exception as e:
+        print(e)
     return None
 
 
@@ -193,9 +226,9 @@ def cprint(msg, color):
 def _crawl_hemnet():
     cprint("Crawling...", Fore.GREEN)
     for url, city in [
-        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml', "Lund"),
-        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml', "Lund"),
-        ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/16190055.xml', "Malmö"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml', "Lund"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml', "Lund"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/16190055.xml', "Malmö"),
     ]:
         _crawl_feed(url, city)
 
@@ -208,16 +241,15 @@ def _crawl_afb():
                      address=a['address'],
                      area=float(a['sqrMtrs']),
                      monthly_fee=float(a['rent']),
-                     rooms=1 if a['shortDescription'] == 'Korridorrum' else float(a['shortDescription'].split()[0]),
+                     rooms=1 if a['shortDescription'] == 'Korridorrum' else float(a['shortDescription'].split()[0].replace(",", ".")),
                      price=0,
                      published=datetime(*map(int, a['reserveFromDate'].split("-"))))
         db.data[p.link]['property'] = p
 
 
-def crawl() -> List[Property]:
+def crawl():
     _crawl_hemnet()
     _crawl_afb()
-    return [v["property"] for v in db.data.values() if "property" in v]
 
 
 def assign_coords(props) -> None:
@@ -231,15 +263,15 @@ def filter_unwanted(props):
     cprint("Filtering away unwanted...", Fore.YELLOW)
 
     def f(p: Property):
-        return p.area >= 55 and \
-            p.monthly_cost() < 6000 and \
-            p.monthly_cost_per_sqm() < 100
+        return p.area >= 55
+            # p.monthly_cost() < 12000 and \
+            # p.monthly_cost_per_sqm() < 120
 
     def dist(p: Property):
-        if city == "Lund":
-            return ((p.distance_to(lund_c_coords) or 0) + (p.distance_to(lth_coords) or 0) < 10)
-        elif city == "Malmö":
-            return (min(p.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]) < 10)
+        if CITY == "Lund":
+            return any((p.distance_to(loc) or 0) < r for loc, r in [(lund_c_coords, 2), (lth_coords, 1)])
+        elif CITY == "Malmö":
+            return min(p.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]) < 2.5
         else:
             return True
 
@@ -247,18 +279,22 @@ def filter_unwanted(props):
 
 
 def main() -> None:
-    cprint(f"Looking for apartments in {city}", Fore.GREEN)
-    props = crawl()
+    cprint(f"Looking for apartments in {CITY}", Fore.GREEN)
+    crawl()
+    db.save()
+
+    props = [v["property"] for v in db.data.values() if "property" in v]
     cprint(f"{len(props)} properties in database", Fore.YELLOW)
 
     assign_coords(props)
     db.save()
 
-    props = filter_unwanted(props)
+    props = filter_unwanted(props)[-30:]
     # If you want to see AFB apartments, use this filtering instead.
     # props = filter(lambda p: p.price == 0, props)
     props = sorted(props, key=lambda p: p.published)
 
+    cprint(f"Assumptions:\n - Downpayment or loan factor: {LOAN_FACTOR or DOWNPAYMENT}\n - Interest: {INTEREST*100}%\n - Opportunity cost of capital: {OPPORTUNITY_COC_RATE*100}%", Fore.GREEN)
     print(tabulate([p.row() for p in props], headers=Property.headers(), floatfmt=(None, '.0f')))
 
 
