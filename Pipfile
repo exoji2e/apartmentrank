@@ -11,6 +11,7 @@ geopy = "*"
 tabulate = "*"
 colorama = "*"
 joblib = "*"
+bs4 = "*"
 
 [dev-packages]
 mypy = "*"

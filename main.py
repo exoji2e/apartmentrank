@@ -78,14 +78,15 @@ def test_degrees_to_direction():
 cities: Dict[str, Dict[str, Any]] = {
     "Lund": {
         "center": lund_c_coords,
-        "attractors": [lund_c_coords],
-        # attractors = [center, lth_coords]
-    },
+        #"attractors": [lund_c_coords],
+        "attractors": [lund_c_coords, lth_coords],
+    }}
+"""
     "Malmö": {
         "center": malmo_c_coords,
         "attractors": [malmo_c_coords, triangeln_coords],
     }
-}
+}"""
 
 
 @dataclass
@@ -190,6 +191,12 @@ def parse_page(title, link):
 
 
 def get_coord(address, city=None) -> Optional[Tuple[float, float]]:
+    for i in range(len(address.split()), 0, -1):
+        loc = _get_coord(' '.join(address.split()[:i]), city)
+        if loc: return loc
+    return None
+
+def _get_coord(address, city=None) -> Optional[Tuple[float, float]]:
     geolocator = Nominatim(user_agent="apartmentbuyer", timeout=10)
     try:
         address = address.split("lgh")[0].split(",")[0] + f", {city or 'Skane'}"
@@ -226,30 +233,16 @@ def cprint(msg, color):
 def _crawl_hemnet():
     cprint("Crawling...", Fore.GREEN)
     for url, city in [
-            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/15979794.xml', "Lund"),
-            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/14927895.xml', "Lund"),
-            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/16190055.xml', "Malmö"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/19972886.xml', "Lund"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/19972128.xml', "Lund"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/19968448.xml', "Lund"),
+            ('https://www.hemnet.se/mitt_hemnet/sparade_sokningar/19972926.xml', "Lund"),
     ]:
         _crawl_feed(url, city)
 
 
-def _crawl_afb():
-    r = requests.get("https://www.afbostader.se/redimo/rest/vacantproducts")
-    data = r.json()['product']
-    for a in data:
-        p = Property(link=f"https://www.afbostader.se/lediga-bostader/bostadsdetalj/?obj={a['productId']}&area={a['area']}",
-                     address=a['address'],
-                     area=float(a['sqrMtrs']),
-                     monthly_fee=float(a['rent']),
-                     rooms=1 if a['shortDescription'] == 'Korridorrum' else float(a['shortDescription'].split()[0].replace(",", ".")),
-                     price=0,
-                     published=datetime(*map(int, a['reserveFromDate'].split("-"))))
-        db.data[p.link]['property'] = p
-
-
 def crawl():
     _crawl_hemnet()
-    _crawl_afb()
 
 
 def assign_coords(props) -> None:
@@ -257,6 +250,7 @@ def assign_coords(props) -> None:
     for prop in props:
         if not prop.coords:
             prop.coords = get_coord(prop.address, prop.city)
+
 
 
 def filter_unwanted(props):
@@ -269,7 +263,7 @@ def filter_unwanted(props):
 
     def dist(p: Property):
         if CITY == "Lund":
-            return any((p.distance_to(loc) or 0) < r for loc, r in [(lund_c_coords, 2), (lth_coords, 1)])
+            return all((p.distance_to(loc) or 10) < r for loc, r in [(lth_coords, 3)])
         elif CITY == "Malmö":
             return min(p.distance_to(loc) or 0 for loc in [malmo_c_coords, triangeln_coords]) < 2.5
         else:
@@ -289,10 +283,10 @@ def main() -> None:
     assign_coords(props)
     db.save()
 
-    props = filter_unwanted(props)[-30:]
+    props = filter_unwanted(props)
     # If you want to see AFB apartments, use this filtering instead.
     # props = filter(lambda p: p.price == 0, props)
-    props = sorted(props, key=lambda p: p.published)
+    props = sorted(props, key=lambda p: p.distance_to(lth_coords))
 
     cprint(f"Assumptions:\n - Downpayment or loan factor: {LOAN_FACTOR or DOWNPAYMENT}\n - Interest: {INTEREST*100}%\n - Opportunity cost of capital: {OPPORTUNITY_COC_RATE*100}%", Fore.GREEN)
     print(tabulate([p.row() for p in props], headers=Property.headers(), floatfmt=(None, '.0f')))
